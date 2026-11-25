@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String           @id @default(cuid())
+  googleId        String           @unique
+  email           String           @unique
+  name            String
+  avatarUrl       String?
+  createdAt       DateTime         @default(now())
+
+  senders         Sender[]
+  campaigns       Campaign[]
+  slackConnection SlackConnection?
+}
+
+// One Slack per user/tenant. Stores the incoming-webhook URL from Slack OAuth.
+model SlackConnection {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webhookUrl    String                 // POST here to notify
+  slackTeamName String?
+  slackChannel  String?
+  createdAt     DateTime @default(now())
+  // disconnect = delete this row; worker checks existence before notifying
+}
+
+// A From-identity = one Ethereal SMTP account. Rate limit is keyed on sender.
+model Sender {
+  id          String     @id @default(cuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fromEmail   String                   // shown in the "From" dropdown
+  displayName String?
+  smtpHost    String     @default("smtp.ethereal.email")
+  smtpPort    Int        @default(587)
+  smtpUser    String                   // Ethereal creds (createTestAccount)
+  smtpPass    String
+  createdAt   DateTime   @default(now())
+
+  campaigns   Campaign[]
+  emailJobs   EmailJob[]
+
+  @@unique([userId, fromEmail])
+}
+
+// One compose = one Campaign. delayMs/hourlyLimit are the PER-CAMPAIGN values from the form,
+// already clamped to the env guardrails at creation time (see section 5).
+model Campaign {
+  id              String     @id @default(cuid())
+  userId          String
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId        String
+  sender          Sender     @relation(fields: [senderId], references: [id])
+  subject         String
+  bodyHtml        String                 // rich-text body
+  startAt         DateTime               // "Send" = now; "Send Later" = picked time
+  delayMs         Int                    // effective min delay between sends (>= MIN_DELAY_MS)
+  hourlyLimit     Int                    // effective per-sender hourly cap (<= MAX_EMAILS_PER_HOUR_PER_SENDER)
+  totalRecipients Int
+  createdAt       DateTime   @default(now())
+
+  emailJobs       EmailJob[]
+}
+
+enum EmailStatus {
+  SCHEDULED     // not yet sent (covers "waiting" + "bumped to a later window")
+  SENDING       // worker picked it up
+  SENT
+  FAILED
+}
+
+// One per recipient. This is what the Scheduled/Sent lists render.
+model EmailJob {
+  id           String      @id @default(cuid())
+  campaignId   String
+  campaign     Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  senderId     String                  // denormalized: queue routing + rate-limit key
+  sender       Sender      @relation(fields: [senderId], references: [id])
+  recipient    String                  // the "To" for this row
+  status       EmailStatus @default(SCHEDULED)
+  scheduledAt  DateTime                // startAt + i*delay; updated when bumped to next window
+  sentAt       DateTime?
+  failedReason String?
+  bullJobId    String      @unique     // deterministic "emailjob:<id>" — idempotency
+  attempts     Int         @default(0)
+  createdAt    DateTime    @default(now())
+
+  @@index([campaignId])
+  @@index([senderId, status])
+  @@index([status, scheduledAt])
+}
