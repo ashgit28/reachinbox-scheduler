@@ -1,0 +1,15 @@
+# OS / editor noise
+.DS_Store
+
+# Dependencies and build output (any folder: backend/, frontend/)
+node_modules/
+dist/
+coverage/
+
+# Secrets: never commit real env files. The .example template IS committed.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
